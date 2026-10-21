@@ -6,7 +6,7 @@ AI 브라우저 [Aside](https://aside.com)의 **설정 화면**을 한글로 바
 ## 받기
 
 - **[⬇ Windows용 다운로드](https://github.com/echidna08/aside-korean/releases/latest/download/Aside_KoreanPatch_Windows.zip)**
-- **[⬇ Mac용 다운로드](https://github.com/echidna08/aside-korean/releases/latest/download/Aside_KoreanPatch_Mac.zip)** (테스트판)
+- **[⬇ Mac용 다운로드](https://github.com/echidna08/aside-korean/releases/latest/download/Aside_KoreanPatch_Mac.zip)**
 
 ## Windows 사용법
 
@@ -48,7 +48,7 @@ Aside는 업데이트가 자주 돼요. 이 패치는 업데이트된 뒤 10분 
 - 설정 화면만 바꿔요. 대화창·에이전트·브라우저 본체는 건드리지 않아요.
 - 영어 원본 보관 위치: Windows `%LOCALAPPDATA%\AsideKoreanPatch\backup`, Mac `~/Library/Application Support/AsideKoreanPatch/backup`
 - 숫자·날짜가 끼어 있는 문장 등 일부는 아직 영어로 남을 수 있어요.
-- Mac판은 테스트판이에요. 안 되면 `3_상태_보기.command` 결과와 함께 이슈로 알려 주세요.
+- 안 되면 `3_상태_보기` 결과와 함께 이슈로 알려 주세요.
 
 ## 어떻게 동작하나요
 

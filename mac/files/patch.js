@@ -13,6 +13,9 @@
 
 const IS_JXA = typeof ObjC !== "undefined";
 const LABEL = "com.asidekoreanpatch";
+const PATCH_VERSION = "1.3.0";
+const REPO = "echidna08/aside-korean";
+const RELEASE_URL = `https://github.com/${REPO}/releases/latest`;
 
 // ── 파일 입출력 (JXA / Node) ──────────────────────────────────────────
 const io = IS_JXA ? (() => {
@@ -64,6 +67,7 @@ const APP_SUPPORT = join(HOME, "Library/Application Support");
 const HOME_DIR = io.env("AKP_HOME") || join(APP_SUPPORT, "AsideKoreanPatch");
 const BACKUP = join(HOME_DIR, "backup");
 const STATE_PATH = join(HOME_DIR, "state.json");
+const UPDATE_PATH = join(HOME_DIR, "update.json");
 const PLIST = join(HOME, "Library/LaunchAgents", LABEL + ".plist");
 let HERE = io.scriptDir();
 let QUIET = false;
@@ -141,6 +145,43 @@ function translate(src, ko) {
   return [out, n];
 }
 
+// ── 새 버전 알림 (알림만 한다. 패치 교체는 사용자가 직접 1번을 눌러서) ──
+function latestTag() {
+  if (io.env("AKP_FAKE_LATEST")) return io.env("AKP_FAKE_LATEST");
+  const r = io.sh(`curl -fsSL -m 10 -H 'User-Agent: AsideKoreanPatch' https://api.github.com/repos/${REPO}/releases/latest`);
+  if (!r.ok) return "";
+  try { return JSON.parse(r.out).tag_name || ""; } catch (e) { return ""; }
+}
+
+function newer(tag, than) {
+  if (!tag) return false;
+  const a = tag.replace(/^v/, "").split(".").map(Number), b = than.split(".").map(Number);
+  for (let i = 0; i < 3; i++) { if ((a[i] || 0) !== (b[i] || 0)) return (a[i] || 0) > (b[i] || 0); }
+  return false;
+}
+
+// 하루에 한 번만 깃허브에 물어본다
+function updateInfo(force) {
+  const u = loadJson(UPDATE_PATH);
+  const today = new Date().toISOString().slice(0, 10);
+  if (force || u.checked !== today) {
+    const tag = latestTag();
+    if (tag) { u.latest = tag; u.checked = today; io.mkdir(HOME_DIR); io.write(UPDATE_PATH, JSON.stringify(u)); }
+  }
+  return u;
+}
+
+// 새 버전이 있으면 그 버전당 한 번만 알림을 띄운다
+function sendUpdateNotice() {
+  const u = updateInfo(false);
+  if (!newer(u.latest, PATCH_VERSION) || u.notified === u.latest) return;
+  const msg = `${u.latest} 나왔어요. 영어로 보이면 새 버전을 받아 1번을 다시 실행해 주세요.`;
+  const r = io.sh(`osascript -e ${q(`display notification "${msg}" with title "Aside 한글패치"`)}`);
+  if (!r.ok) return;
+  u.notified = u.latest;
+  io.write(UPDATE_PATH, JSON.stringify(u));
+}
+
 // ── 명령 ────────────────────────────────────────────────────────────
 function apply() {
   const ko = new Map(Object.entries(loadJson(join(HERE, "ko.json"))));
@@ -179,6 +220,7 @@ function apply() {
   say("- 영어 원본은 따로 보관해 뒀어요. 2_영어로_되돌리기.command 로 언제든 돌아갈 수 있어요.");
   say("");
   say("설정 화면이 열려 있으면 Cmd+R 을 눌러 새로고침해 주세요.");
+  if (QUIET) sendUpdateNotice();  // 자동 재적용 때만
 }
 
 function revert() {
@@ -217,6 +259,14 @@ function status() {
   say(`업데이트 뒤 자동으로 다시 한글로: ${agentLoaded() ? "켜짐" : "꺼짐"}`);
   say(`Aside 설정 화면 버전: ${latest || "찾지 못함"}`);
   say(`Aside 설정 폴더: ${AM_ROOT || "찾지 못함"}`);
+  const installed = join(HOME_DIR, "patch.js");
+  const m = io.exists(installed) ? io.read(installed).match(/const PATCH_VERSION = "([^"]+)"/) : null;
+  const iv = m ? m[1] : "1.2.0";
+  say(`설치된 패치 버전: ${m ? iv : "1.2.0 이하"}`);
+  const tag = updateInfo(true).latest;
+  if (!tag) say("최신 버전: 확인 못 함 (인터넷 연결 확인)");
+  else if (newer(tag, iv)) say(`새 버전 ${tag} 나왔어요 → ${RELEASE_URL} 에서 받아서 1번을 다시 실행해 주세요.`);
+  else say(`최신 버전이에요. (${tag})`);
 }
 
 function install() {

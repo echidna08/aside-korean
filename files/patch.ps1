@@ -28,6 +28,10 @@ $HOME_DIR = if ($env:AKP_HOME) { $env:AKP_HOME } else { Join-Path $env:LOCALAPPD
 $BACKUP = Join-Path $HOME_DIR "backup"
 $STATE_PATH = Join-Path $HOME_DIR "state.json"
 $TASK_NAME = "AsideKoreanPatch"
+$PATCH_VERSION = "1.3.0"
+$REPO = "echidna08/aside-korean"
+$RELEASE_URL = "https://github.com/$REPO/releases/latest"
+$UPDATE_PATH = Join-Path $HOME_DIR "update.json"
 $UTF8 = New-Object Text.UTF8Encoding($false)
 $JSON = New-Object Web.Script.Serialization.JavaScriptSerializer
 $JSON.MaxJsonLength = 64MB
@@ -50,6 +54,55 @@ function LoadJson($p) {
 
 function Test-Admin {
     ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+}
+
+# ── 새 버전 알림 (알림만 한다. 패치 교체는 사용자가 직접 1번을 눌러서) ──
+function Get-LatestTag {
+    if ($env:AKP_FAKE_LATEST) { return $env:AKP_FAKE_LATEST }
+    try {
+        [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+        $r = Invoke-RestMethod "https://api.github.com/repos/$REPO/releases/latest" -TimeoutSec 10 -Headers @{ "User-Agent" = "AsideKoreanPatch" }
+        return [string]$r.tag_name
+    } catch { return $null }
+}
+
+function Test-Newer($tag) {
+    if (-not $tag) { return $false }
+    try { return [version]($tag.TrimStart("v")) -gt [version]$PATCH_VERSION } catch { return $false }
+}
+
+# 하루에 한 번만 깃허브에 물어본다
+function Get-UpdateInfo([switch]$force) {
+    $u = LoadJson $UPDATE_PATH
+    $today = (Get-Date).ToString("yyyy-MM-dd")
+    if ($force -or $u["checked"] -ne $today) {
+        $tag = Get-LatestTag
+        if ($tag) {
+            $u["latest"] = $tag; $u["checked"] = $today
+            New-Item -ItemType Directory -Force -Path $HOME_DIR | Out-Null
+            WriteText $UPDATE_PATH ($JSON.Serialize($u))
+        }
+    }
+    $u
+}
+
+function Show-Toast($title, $body) {
+    [void][Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType = WindowsRuntime]
+    [void][Windows.Data.Xml.Dom.XmlDocument, Windows.Data.Xml.Dom.XmlDocument, ContentType = WindowsRuntime]
+    $xml = New-Object Windows.Data.Xml.Dom.XmlDocument
+    $xml.LoadXml("<toast activationType=`"protocol`" launch=`"$RELEASE_URL`"><visual><binding template=`"ToastGeneric`"><text>$title</text><text>$body</text></binding></visual><actions><action activationType=`"protocol`" content=`"받으러 가기`" arguments=`"$RELEASE_URL`"/></actions></toast>")
+    $appId = '{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}\WindowsPowerShell\v1.0\powershell.exe'
+    [Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier($appId).Show([Windows.UI.Notifications.ToastNotification]::new($xml))
+}
+
+# 새 버전이 있으면 그 버전당 한 번만 알림을 띄운다
+function Send-UpdateNotice {
+    $u = Get-UpdateInfo
+    $tag = $u["latest"]
+    if (-not (Test-Newer $tag) -or $u["notified"] -eq $tag) { return }
+    try { Show-Toast "Aside 한글패치 $tag 나왔어요" "Aside 업데이트로 영어로 보이면 새 버전을 받아 1_한글로_바꾸기.cmd 를 다시 실행해 주세요." } catch { return }
+    $u["notified"] = $tag
+    WriteText $UPDATE_PATH ($JSON.Serialize($u))
 }
 
 # 설정 화면 묶음 목록: 이름 → assets 폴더 (오래된 것부터)
@@ -143,6 +196,7 @@ function Invoke-Apply {
     Say "- 영어 원본은 따로 보관해 뒀어요. 2_영어로_되돌리기.cmd 로 언제든 돌아갈 수 있어요."
     Say ""
     Say "Aside 설정 화면이 열려 있으면 F5를 눌러 새로고침해 주세요."
+    if ($quiet) { Send-UpdateNotice }  # 자동 재적용 때만
 }
 
 function Invoke-Revert {
@@ -179,6 +233,13 @@ function Show-Status {
     Say "업데이트 뒤 자동으로 다시 한글로: $(if ($task) { '켜짐' } else { '꺼짐' })"
     foreach ($b in $bundles) { Say "  $($b.Id): $(if ($on -contains $b) { '한글' } else { '영어' })" }
     if (-not $bundles.Count) { Say "Aside 설정 화면: 찾지 못함" }
+    $installed = Join-Path $HOME_DIR "patch.ps1"
+    $iv = if (Test-Path -LiteralPath $installed) { ([regex]::Match((ReadText $installed), '\$PATCH_VERSION = "([^"]+)"')).Groups[1].Value } else { "" }
+    Say "설치된 패치 버전: $(if ($iv) { $iv } else { '1.2.0 이하' })"
+    $latest = (Get-UpdateInfo -force)["latest"]
+    if (-not $latest) { Say "최신 버전: 확인 못 함 (인터넷 연결 확인)" }
+    elseif ([version]$latest.TrimStart("v") -gt [version]$(if ($iv) { $iv } else { "1.2.0" })) { Say "새 버전 $latest 나왔어요 → $RELEASE_URL 에서 받아서 1번을 다시 실행해 주세요." }
+    else { Say "최신 버전이에요. ($latest)" }
 }
 
 function Invoke-Install {

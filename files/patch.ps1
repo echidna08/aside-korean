@@ -1,14 +1,17 @@
 ﻿# Aside 설정 화면 한글패치 (Windows PowerShell 5.1 이상, 설치 필요 없음)
 #
-#   patch.ps1 install     고정 위치에 복사 + 10분마다 자동 재적용 등록 + 적용
-#   patch.ps1 uninstall   자동 재적용 끄기 + 영어 원본으로 되돌리기
-#   patch.ps1 apply       설치된 모든 버전에 한글 적용 (이미 적용된 건 건너뜀)
+#   patch.ps1 install     고정 위치에 복사 + 10분마다 자동 재적용 등록 + 적용 (관리자 권한 필요)
+#   patch.ps1 uninstall   자동 재적용 끄기 + 영어 원본으로 되돌리기 (관리자 권한 필요)
+#   patch.ps1 apply       찾은 모든 설정 화면 묶음에 한글 적용 (이미 적용된 건 건너뜀)
 #   patch.ps1 revert      영어 원본으로 되돌리기 + 원본과 같은지 검사
 #   patch.ps1 status      지금 상태 보기
 #   -quiet                출력 없이 (자동 재적용용, 오류는 error.log 에)
 #
-# 설정 화면 청크(AsideAgentManager\<버전>\assets\*.js)의 key:"English" 문자열만 ko.json 대로 바꾼다.
-# 영어 원본은 %LOCALAPPDATA%\AsideKoreanPatch\backup\<버전>\ 에 보관한다.
+# 설정 화면 청크(AsideAgentManager\assets\*.js)의 key:"English" 문자열만 ko.json 대로 바꾼다.
+# AsideAgentManager 는 두 군데에 있을 수 있다.
+#   - %LOCALAPPDATA%\Aside\User Data\AsideAgentManager\<버전>\   (자동 업데이트로 받은 것, 묶음 이름 = <버전>)
+#   - C:\Program Files\Aside\Application\<앱버전>\AsideAgentManager\ (Aside 1.0.1022 부터 기본 탑재, 묶음 이름 = app-<앱버전>)
+# 영어 원본은 %LOCALAPPDATA%\AsideKoreanPatch\backup\<묶음 이름>\ 에 보관한다.
 param([string]$cmd = "status", [switch]$quiet)
 
 $ErrorActionPreference = "Stop"
@@ -17,6 +20,10 @@ Add-Type -AssemblyName System.Web.Extensions
 
 $HERE = $PSScriptRoot
 $AM_ROOT = if ($env:AKP_ROOT) { $env:AKP_ROOT } else { Join-Path $env:LOCALAPPDATA "Aside\User Data\AsideAgentManager" }
+$APP_ROOTS = if ($env:AKP_APP_ROOT) { @($env:AKP_APP_ROOT) } else {
+    @((Join-Path $env:ProgramFiles "Aside\Application"), (Join-Path ${env:ProgramFiles(x86)} "Aside\Application"),
+      (Join-Path $env:LOCALAPPDATA "Aside\Application"))
+}
 $HOME_DIR = if ($env:AKP_HOME) { $env:AKP_HOME } else { Join-Path $env:LOCALAPPDATA "AsideKoreanPatch" }
 $BACKUP = Join-Path $HOME_DIR "backup"
 $STATE_PATH = Join-Path $HOME_DIR "state.json"
@@ -34,18 +41,42 @@ function Say($s) { if (-not $quiet) { Write-Host $s } }
 function ReadText($p) { [IO.File]::ReadAllText($p, $UTF8) }
 function WriteText($p, $s) { [IO.File]::WriteAllText($p, $s, $UTF8) }
 function Sha($p) { (Get-FileHash -Algorithm SHA256 -LiteralPath $p).Hash.ToLower() }
+function SortKey($s) { try { [version]$s } catch { [version]"0.0" } }
 
 function LoadJson($p) {
     if (Test-Path -LiteralPath $p) { try { return $JSON.DeserializeObject((ReadText $p)) } catch {} }
     return @{}
 }
 
-function Get-Versions {
-    if (-not (Test-Path -LiteralPath $AM_ROOT)) { return @() }
-    @(Get-ChildItem -LiteralPath $AM_ROOT -Directory |
-        Where-Object { Test-Path -LiteralPath (Join-Path $_.FullName "manifest.json") } |
-        Sort-Object { try { [version]$_.Name } catch { [version]"0.0" } } |
-        ForEach-Object { $_.Name })
+function Test-Admin {
+    ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+}
+
+# 설정 화면 묶음 목록: 이름 → assets 폴더 (오래된 것부터)
+function Get-Bundles {
+    $list = @()
+    if (Test-Path -LiteralPath $AM_ROOT) {
+        foreach ($d in Get-ChildItem -LiteralPath $AM_ROOT -Directory) {
+            if (Test-Path -LiteralPath (Join-Path $d.FullName "manifest.json")) {
+                $list += [pscustomobject]@{ Id = $d.Name; Assets = Join-Path $d.FullName "assets"; Key = SortKey $d.Name; App = $false }
+            }
+        }
+    }
+    foreach ($root in $APP_ROOTS) {
+        if (-not ($root -and (Test-Path -LiteralPath $root))) { continue }
+        foreach ($d in Get-ChildItem -LiteralPath $root -Directory) {
+            $am = Join-Path $d.FullName "AsideAgentManager"
+            if (Test-Path -LiteralPath (Join-Path $am "manifest.json")) {
+                $list += [pscustomobject]@{ Id = "app-$($d.Name)"; Assets = Join-Path $am "assets"; Key = SortKey $d.Name; App = $true }
+            }
+        }
+    }
+    @($list | Sort-Object App, Key)
+}
+
+function Find-Assets($id) {
+    $b = @(Get-Bundles) | Where-Object { $_.Id -eq $id } | Select-Object -First 1
+    if ($b) { $b.Assets } else { $null }
 }
 
 # 설정 라우트만 쓰는 청크 (설정 밖 라우트도 쓰는 공용 청크는 제외)
@@ -71,8 +102,10 @@ function Invoke-Apply {
     $ko = LoadJson (Join-Path $HERE "ko.json")
     $state = LoadJson $STATE_PATH
     $script:total = 0
-    foreach ($v in Get-Versions) {
-        $assets = Join-Path $AM_ROOT "$v\assets"
+    $denied = @()
+    $bundles = @(Get-Bundles)
+    foreach ($b in $bundles) {
+        $v = $b.Id; $assets = $b.Assets
         if (-not $state.ContainsKey($v)) { $state[$v] = @{} }
         $vs = $state[$v]
         foreach ($f in Get-SettingsFiles $assets) {
@@ -94,7 +127,7 @@ function Invoke-Apply {
                 return $m.Groups[1].Value + ':"' + $t + '"'
             })
             if ($script:n -eq 0) { continue }
-            WriteText $path $out
+            try { WriteText $path $out } catch { if ($denied -notcontains $v) { $denied += $v }; continue }  # Program Files 는 관리자만 쓸 수 있다
             $vs[$f] = @{ original = (Sha $bak); patched = (Sha $path); count = $script:n }
             $script:total += $script:n
         }
@@ -102,24 +135,26 @@ function Invoke-Apply {
     New-Item -ItemType Directory -Force -Path $HOME_DIR | Out-Null
     WriteText $STATE_PATH ($JSON.Serialize($state))
     $all = 0; foreach ($v in $state.Values) { foreach ($x in $v.Values) { $all += $x["count"] } }
-    $latest = @(Get-Versions)[-1]
     Say "Aside 설정 화면을 한글로 바꾸는 중이에요..."
     Say "- 완료! 이번에 $($script:total)곳을 한글로 바꿨어요. (전체 ${all}곳)"
-    Say "- 최신 버전: $(if ($latest) { $latest } else { '찾지 못함 (Aside 설치·로그인 후 설정 화면을 한 번 열어 주세요)' })"
+    if ($bundles.Count -eq 0) { Say "- Aside 설정 파일을 찾지 못했어요. Aside 설치·로그인 후 설정 화면을 한 번 열어 주세요." }
+    else { Say "- 찾은 설정 화면: $(($bundles | ForEach-Object Id) -join ', ')" }
+    if ($denied.Count) { Say "- 권한이 없어 못 바꾼 곳: $($denied -join ', ') (1번을 다시 눌러 '예'로 허용해 주세요)" }
     Say "- 영어 원본은 따로 보관해 뒀어요. 2_영어로_되돌리기.cmd 로 언제든 돌아갈 수 있어요."
     Say ""
-    Say "설정 화면이 열려 있으면 F5를 눌러 새로고침해 주세요."
+    Say "Aside 설정 화면이 열려 있으면 F5를 눌러 새로고침해 주세요."
 }
 
 function Invoke-Revert {
     $state = LoadJson $STATE_PATH
     $restored = 0; $bad = @()
     foreach ($v in @($state.Keys)) {
-        $assets = Join-Path $AM_ROOT "$v\assets"
+        $assets = Find-Assets $v
+        if (-not $assets) { continue }
         foreach ($f in @($state[$v].Keys)) {
             $bak = Join-Path $BACKUP "$v\$f"
             $path = Join-Path $assets $f
-            if (-not ((Test-Path -LiteralPath $bak) -and (Test-Path -LiteralPath $assets))) { continue }
+            if (-not (Test-Path -LiteralPath $bak)) { continue }
             Copy-Item -LiteralPath $bak -Destination $path -Force
             $restored++
             if ((Sha $path) -ne $state[$v][$f]["original"]) { $bad += "$v\$f" }
@@ -136,34 +171,47 @@ function Invoke-Revert {
 
 function Show-Status {
     $state = LoadJson $STATE_PATH
-    $latest = @(Get-Versions)[-1]
-    $on = $latest -and $state.ContainsKey($latest) -and $state[$latest].Count -gt 0
+    $bundles = @(Get-Bundles)
     $task = Get-ScheduledTask -TaskName $TASK_NAME -ErrorAction SilentlyContinue
-    Say "지금 상태: $(if ($on) { '한글' } else { '영어' })"
+    $on = @($bundles | Where-Object { $state.ContainsKey($_.Id) -and $state[$_.Id].Count -gt 0 })
+    Say "지금 상태: $(if ($bundles.Count -and $on.Count -eq $bundles.Count) { '한글' } elseif ($on.Count) { '일부만 한글' } else { '영어' })"
     Say "영어 원본 보관: $(if (Test-Path -LiteralPath $BACKUP) { '정상' } else { '없음' })"
     Say "업데이트 뒤 자동으로 다시 한글로: $(if ($task) { '켜짐' } else { '꺼짐' })"
-    Say "Aside 설정 화면 버전: $(if ($latest) { $latest } else { '찾지 못함' })"
+    foreach ($b in $bundles) { Say "  $($b.Id): $(if ($on -contains $b) { '한글' } else { '영어' })" }
+    if (-not $bundles.Count) { Say "Aside 설정 화면: 찾지 못함" }
 }
 
 function Invoke-Install {
+    if (-not (Test-Admin)) {
+        Say "관리자 권한이 필요해요. (Aside 설정 파일이 Program Files 안에 있어요)"
+        Say "1_한글로_바꾸기.cmd 를 다시 실행해서 '예'를 눌러 주세요."
+        return
+    }
     New-Item -ItemType Directory -Force -Path $HOME_DIR | Out-Null
     foreach ($f in "patch.ps1", "ko.json") {
         $src = Join-Path $HERE $f; $dst = Join-Path $HOME_DIR $f
         if ($src -ne $dst) { Copy-Item -LiteralPath $src -Destination $dst -Force }
     }
     $seed = Join-Path $HERE "backup_seed"  # 이미 한글로 바뀐 PC용 영어 원본 (배포판에는 없음)
-    if (Test-Path -LiteralPath $seed) { Copy-Item -Path "$seed\*" -Destination $BACKUP -Recurse -Force -ErrorAction SilentlyContinue }
+    if (Test-Path -LiteralPath $seed) {
+        New-Item -ItemType Directory -Force -Path $BACKUP | Out-Null
+        foreach ($d in Get-ChildItem -LiteralPath $seed -Directory) {
+            Copy-Item -LiteralPath $d.FullName -Destination $BACKUP -Recurse -Force
+        }
+    }
 
-    # conhost --headless 로 돌려서 10분마다 창이 깜빡이지 않게 한다
+    # 관리자 권한으로 돌아야 Program Files 를 고칠 수 있다. conhost --headless 로 창이 깜빡이지 않게 한다
     $ps = Join-Path $PSHOME "powershell.exe"
     $arg = "--headless `"$ps`" -NoProfile -ExecutionPolicy Bypass -File `"$(Join-Path $HOME_DIR 'patch.ps1')`" apply -quiet"
     $ok = $true
     try {
+        $user = "$env:USERDOMAIN\$env:USERNAME"
         $action = New-ScheduledTaskAction -Execute "conhost.exe" -Argument $arg
         $trigger = New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(1) -RepetitionInterval (New-TimeSpan -Minutes 10)
-        $logon = New-ScheduledTaskTrigger -AtLogOn -User "$env:USERDOMAIN\$env:USERNAME"
+        $logon = New-ScheduledTaskTrigger -AtLogOn -User $user
         $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -ExecutionTimeLimit (New-TimeSpan -Minutes 5)
-        Register-ScheduledTask -TaskName $TASK_NAME -Action $action -Trigger $trigger, $logon -Settings $settings -Force | Out-Null
+        $principal = New-ScheduledTaskPrincipal -UserId $user -LogonType Interactive -RunLevel Highest
+        Register-ScheduledTask -TaskName $TASK_NAME -Action $action -Trigger $trigger, $logon -Settings $settings -Principal $principal -Force | Out-Null
     } catch { $ok = $false }
 
     $script:HERE = $HOME_DIR
@@ -172,6 +220,10 @@ function Invoke-Install {
 }
 
 function Invoke-Uninstall {
+    if (-not (Test-Admin)) {
+        Say "관리자 권한이 필요해요. 2_영어로_되돌리기.cmd 를 다시 실행해서 '예'를 눌러 주세요."
+        return
+    }
     Unregister-ScheduledTask -TaskName $TASK_NAME -Confirm:$false -ErrorAction SilentlyContinue
     Invoke-Revert
     Say "- 자동으로 다시 한글로 바뀌는 기능도 껐어요."

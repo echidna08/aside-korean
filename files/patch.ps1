@@ -28,7 +28,7 @@ $HOME_DIR = if ($env:AKP_HOME) { $env:AKP_HOME } else { Join-Path $env:LOCALAPPD
 $BACKUP = Join-Path $HOME_DIR "backup"
 $STATE_PATH = Join-Path $HOME_DIR "state.json"
 $TASK_NAME = "AsideKoreanPatch"
-$PATCH_VERSION = "1.3.1"
+$PATCH_VERSION = "1.3.2"
 $REPO = "echidna08/aside-korean"
 $RELEASE_URL = "https://github.com/$REPO/releases/latest"
 $UPDATE_PATH = Join-Path $HOME_DIR "update.json"
@@ -152,7 +152,9 @@ function Get-SettingsFiles($assets) {
 }
 
 function Invoke-Apply {
-    $ko = LoadJson (Join-Path $HERE "ko.json")
+    $koPath = Join-Path $HERE "ko.json"
+    $ko = LoadJson $koPath
+    $koSha = Sha $koPath  # 사전이 바뀌면 이미 적용한 파일도 영어 원본에서 다시 번역한다
     $state = LoadJson $STATE_PATH
     $script:total = 0
     $denied = @()
@@ -164,7 +166,7 @@ function Invoke-Apply {
         foreach ($f in Get-SettingsFiles $assets) {
             $path = Join-Path $assets $f
             $cur = Sha $path
-            if ($vs.ContainsKey($f) -and $vs[$f]["patched"] -eq $cur) { continue }  # 이미 적용됨
+            if ($vs.ContainsKey($f) -and $vs[$f]["patched"] -eq $cur -and $vs[$f]["ko"] -eq $koSha) { continue }  # 이미 같은 사전으로 적용됨
             $bak = Join-Path $BACKUP "$v\$f"
             if (-not (Test-Path -LiteralPath $bak)) {
                 if ($HANGUL.IsMatch((ReadText $path))) { continue }  # 원본 없이 이미 한글인 파일은 원본으로 저장하지 않는다
@@ -181,7 +183,7 @@ function Invoke-Apply {
             })
             if ($script:n -eq 0) { continue }
             try { WriteText $path $out } catch { if ($denied -notcontains $v) { $denied += $v }; continue }  # Program Files 는 관리자만 쓸 수 있다
-            $vs[$f] = @{ original = (Sha $bak); patched = (Sha $path); count = $script:n }
+            $vs[$f] = @{ original = (Sha $bak); patched = (Sha $path); count = $script:n; ko = $koSha }
             $script:total += $script:n
         }
     }

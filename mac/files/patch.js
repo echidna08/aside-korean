@@ -13,7 +13,7 @@
 
 const IS_JXA = typeof ObjC !== "undefined";
 const LABEL = "com.asidekoreanpatch";
-const PATCH_VERSION = "1.3.1";
+const PATCH_VERSION = "1.3.2";
 const REPO = "echidna08/aside-korean";
 const RELEASE_URL = `https://github.com/${REPO}/releases/latest`;
 
@@ -202,6 +202,7 @@ function sendUpdateNotice() {
 // ── 명령 ────────────────────────────────────────────────────────────
 function apply() {
   const ko = new Map(Object.entries(loadJson(join(HERE, "ko.json"))));
+  const koHash = hash(io.read(join(HERE, "ko.json")));  // 사전이 바뀌면 이미 적용한 파일도 영어 원본에서 다시 번역한다
   const state = loadJson(STATE_PATH);
   let total = 0; const failed = [];
   for (const v of versions()) {
@@ -210,18 +211,26 @@ function apply() {
     for (const f of settingsFiles(assets)) {
       const path = join(assets, f);
       const cur = io.read(path);
-      if (vs[f] && vs[f].patched === hash(cur)) continue;  // 이미 적용됨
-      if (HANGUL.test(cur)) continue;  // 원본 없이 이미 한글인 파일은 원본으로 저장하지 않는다
-      // 지금 파일이 영어 원본이다. Aside가 업데이트됐을 수 있으니 백업도 새로 뜬다.
       const bak = join(BACKUP, v, f);
-      io.mkdir(dirname(bak));
-      io.copy(path, bak);
-      const orig = cur;
+      let orig;
+      if (vs[f] && vs[f].patched === hash(cur)) {
+        if (vs[f].ko === koHash) continue;  // 이미 같은 사전으로 적용됨
+        // 예전 사전으로 적용된 파일이다. 보관해 둔 영어 원본에서 다시 번역한다.
+        if (!io.exists(bak)) continue;
+        orig = io.read(bak);
+        if (hash(orig) !== vs[f].original) continue;  // 원본이 맞는지 확인이 안 되면 건드리지 않는다
+      } else {
+        if (HANGUL.test(cur)) continue;  // 원본 없이 이미 한글인 파일은 원본으로 저장하지 않는다
+        // 지금 파일이 영어 원본이다. Aside가 업데이트됐을 수 있으니 백업도 새로 뜬다.
+        io.mkdir(dirname(bak));
+        io.copy(path, bak);
+        orig = cur;
+      }
       const [out, n] = translate(orig, ko);
       if (n === 0) continue;
       io.write(path, out);
       if (io.read(path) !== out) { failed.push(f); continue; }  // macOS '앱 관리' 권한 등으로 막힌 경우
-      vs[f] = { original: hash(orig), patched: hash(out), count: n };
+      vs[f] = { original: hash(orig), patched: hash(out), count: n, ko: koHash };
       total += n;
     }
   }

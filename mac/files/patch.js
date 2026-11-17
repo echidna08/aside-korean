@@ -13,7 +13,7 @@
 
 const IS_JXA = typeof ObjC !== "undefined";
 const LABEL = "com.asidekoreanpatch";
-const PATCH_VERSION = "1.3.0";
+const PATCH_VERSION = "1.3.1";
 const REPO = "echidna08/aside-korean";
 const RELEASE_URL = `https://github.com/${REPO}/releases/latest`;
 

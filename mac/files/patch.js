@@ -29,7 +29,7 @@ const io = IS_JXA ? (() => {
     write: (p, s) => $(s).writeToFileAtomicallyEncodingError(p, true, $.NSUTF8StringEncoding, null),
     exists: (p) => fm.fileExistsAtPath(p),
     isDir: (p) => { const d = Ref(); return fm.fileExistsAtPathIsDirectory(p, d) && d[0]; },
-    list: (p) => ObjC.unwrap(fm.contentsOfDirectoryAtPathError(p, null)).map((x) => ObjC.unwrap(x)),
+    list: (p) => { const e = Ref(); const a = fm.contentsOfDirectoryAtPathError(p, e); return a.isNil() ? [] : ObjC.unwrap(a).map((x) => ObjC.unwrap(x)); },
     mkdir: (p) => fm.createDirectoryAtPathWithIntermediateDirectoriesAttributesError(p, true, $(), null),
     copy: (a, b) => { if (fm.fileExistsAtPath(b)) fm.removeItemAtPathError(b, null); fm.copyItemAtPathToPathError(a, b, null); },
     sh: (cmd) => { try { return { ok: true, out: app.doShellScript(cmd) }; } catch (e) { return { ok: false, out: String(e) }; } },
@@ -72,18 +72,31 @@ const PLIST = join(HOME, "Library/LaunchAgents", LABEL + ".plist");
 let HERE = io.scriptDir();
 let QUIET = false;
 
-// Aside 폴더 위치는 버전마다 다를 수 있어서 Application Support 아래를 찾아본다
+// Aside 폴더 위치는 버전마다 다르다.
+// 1.0.1116.2 부터는 설정 화면이 앱 번들 안(Contents/Frameworks/*/Versions/Current/Libraries)에 들어 있다.
+function hasVersionDir(base) {
+  return io.isDir(base) && io.list(base).some((v) => io.exists(join(base, v, "manifest.json")));
+}
+
 function findRoot() {
   if (io.env("AKP_ROOT")) return io.env("AKP_ROOT");
+  for (const a of [join("/Applications", "Aside.app"), join(HOME, "Applications/Aside.app")]) {
+    const fw = join(a, "Contents/Frameworks");
+    if (!io.isDir(fw)) continue;
+    for (const d of io.list(fw)) {
+      const libs = join(fw, d, "Versions/Current/Libraries");
+      if (io.isDir(join(libs, "AsideAgentManager"))) return libs;
+    }
+  }
   const first = join(APP_SUPPORT, "Aside/AsideAgentManager");
-  if (io.isDir(first)) return first;
+  if (hasVersionDir(first)) return first;
   if (!io.isDir(APP_SUPPORT)) return "";
   for (const a of io.list(APP_SUPPORT).filter((n) => /aside/i.test(n))) {
     const d1 = join(APP_SUPPORT, a);
     if (!io.isDir(d1)) continue;
-    if (io.isDir(join(d1, "AsideAgentManager"))) return join(d1, "AsideAgentManager");
+    if (hasVersionDir(join(d1, "AsideAgentManager"))) return join(d1, "AsideAgentManager");
     for (const b of io.list(d1)) {
-      if (io.isDir(join(d1, b, "AsideAgentManager"))) return join(d1, b, "AsideAgentManager");
+      if (hasVersionDir(join(d1, b, "AsideAgentManager"))) return join(d1, b, "AsideAgentManager");
     }
   }
   return "";
@@ -112,8 +125,12 @@ function loadJson(p) {
 function versions() {
   if (!AM_ROOT || !io.isDir(AM_ROOT)) return [];
   const key = (v) => v.split(".").map((x) => (/^\d+$/.test(x) ? +x : 0));
+  const hasSettings = (v) => {
+    const assets = join(AM_ROOT, v, "assets");
+    return io.isDir(assets) && io.list(assets).some((f) => f.startsWith("extension-main-") && f.endsWith(".js"));
+  };
   return io.list(AM_ROOT)
-    .filter((v) => io.exists(join(AM_ROOT, v, "manifest.json")))
+    .filter((v) => io.exists(join(AM_ROOT, v, "manifest.json")) && hasSettings(v))
     .sort((a, b) => { const x = key(a), y = key(b); for (let i = 0; i < Math.max(x.length, y.length); i++) { if ((x[i] || 0) !== (y[i] || 0)) return (x[i] || 0) - (y[i] || 0); } return 0; });
 }
 
@@ -186,7 +203,7 @@ function sendUpdateNotice() {
 function apply() {
   const ko = new Map(Object.entries(loadJson(join(HERE, "ko.json"))));
   const state = loadJson(STATE_PATH);
-  let total = 0;
+  let total = 0; const failed = [];
   for (const v of versions()) {
     const assets = join(AM_ROOT, v, "assets");
     const vs = (state[v] = state[v] || {});
@@ -194,16 +211,16 @@ function apply() {
       const path = join(assets, f);
       const cur = io.read(path);
       if (vs[f] && vs[f].patched === hash(cur)) continue;  // 이미 적용됨
+      if (HANGUL.test(cur)) continue;  // 원본 없이 이미 한글인 파일은 원본으로 저장하지 않는다
+      // 지금 파일이 영어 원본이다. Aside가 업데이트됐을 수 있으니 백업도 새로 뜬다.
       const bak = join(BACKUP, v, f);
-      if (!io.exists(bak)) {
-        if (HANGUL.test(cur)) continue;  // 원본 없이 이미 한글인 파일은 원본으로 저장하지 않는다
-        io.mkdir(dirname(bak));
-        io.copy(path, bak);
-      }
-      const orig = io.read(bak);
+      io.mkdir(dirname(bak));
+      io.copy(path, bak);
+      const orig = cur;
       const [out, n] = translate(orig, ko);
       if (n === 0) continue;
       io.write(path, out);
+      if (io.read(path) !== out) { failed.push(f); continue; }  // macOS '앱 관리' 권한 등으로 막힌 경우
       vs[f] = { original: hash(orig), patched: hash(out), count: n };
       total += n;
     }
@@ -214,8 +231,9 @@ function apply() {
   for (const v of Object.values(state)) for (const x of Object.values(v)) all += x.count;
   const vs = versions();
   say("Aside 설정 화면을 한글로 바꾸는 중이에요...");
-  if (!AM_ROOT) say("- Aside 설정 파일을 찾지 못했어요. Aside 설치·로그인 후 설정 화면을 한 번 열고 다시 해 주세요.");
+  if (!AM_ROOT) say("- Aside 설정 파일을 찾지 못했어요. Aside가 /Applications 에 설치돼 있는지 확인해 주세요.");
   say(`- 완료! 이번에 ${total}곳을 한글로 바꿨어요. (전체 ${all}곳)`);
+  if (failed.length) say(`- 주의: 파일 ${failed.length}개를 쓰지 못했어요. 시스템 설정 → 개인정보 보호 및 보안 → 앱 관리에서 터미널을 허용한 뒤 1번을 다시 실행해 주세요.`);
   say(`- 최신 버전: ${vs.length ? vs[vs.length - 1] : "찾지 못함"}`);
   say("- 영어 원본은 따로 보관해 뒀어요. 2_영어로_되돌리기.command 로 언제든 돌아갈 수 있어요.");
   say("");
@@ -225,12 +243,15 @@ function apply() {
 
 function revert() {
   const state = loadJson(STATE_PATH);
-  let restored = 0; const bad = [];
+  let restored = 0, kept = 0; const bad = [];
   for (const v of Object.keys(state)) {
     const assets = join(AM_ROOT, v, "assets");
     for (const f of Object.keys(state[v])) {
       const bak = join(BACKUP, v, f);
       if (!(io.exists(bak) && io.isDir(assets))) continue;
+      const patched = state[v][f].patched;
+      // 패치한 뒤에 Aside가 업데이트된 파일은 구버전 원본으로 덮어쓰지 않는다
+      if (patched && hash(io.read(join(assets, f))) !== patched) { kept++; continue; }
       io.copy(bak, join(assets, f));
       restored++;
       if (hash(io.read(join(assets, f))) !== state[v][f].original) bad.push(`${v}/${f}`);
@@ -240,6 +261,7 @@ function revert() {
   io.write(STATE_PATH, "{}");
   say("처음 상태(영어 원본)로 되돌리는 중이에요...");
   say(`- 파일 ${restored}개를 원본으로 되돌렸어요.`);
+  if (kept) say(`- 새 버전으로 바뀐 파일 ${kept}개는 그대로 뒀어요.`);
   say(bad.length ? `- 주의: 원본과 다른 파일 ${bad.length}개: ${bad.join(", ")}` : "- 원본과 똑같은 걸 확인했어요.");
   say("");
   say("설정 화면을 새로고침(Cmd+R)하면 영어로 돌아가요.");
